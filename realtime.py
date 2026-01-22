@@ -41,140 +41,174 @@ def calculate_rms(audio_data: bytes) -> float:
     return rms
 
 
-async def main() -> None:
-    """
-    When prompted for user input, type a message and hit enter to send it to the model. Enter "q" to quit the conversation.
-    """
+async def capture_and_send_audio(connection):
+    """Continuously capture audio from mic and send to AI"""
     global ai_speaking, last_audio_time
 
-    async with async_client.realtime.connect(
-        model="gpt-realtime",
-    ) as connection:
-        # after the connection is created, configure the session.
-        await connection.session.update(
-            session={
-                "type": "realtime",
-                "instructions": "You are a helpful assistant. You respond by voice and text. You have the access to the knowledge assistant and you can call it when you have no information related to the user query in your knowledge. That knowledge assistant may retrieve some information if they have related to that query.So format the query/question and pass to that knowledge assistant whenever needed.",
-                "output_modalities": ["audio", "text"],
-                "audio": {
-                    "input": {
-                        "transcription": {
-                            "model": "whisper-1",
-                        },
-                        "format": {
-                            "type": "audio/pcm",
-                            "rate": 24000,
-                        },
-                        "turn_detection": {
-                            "type": "server_vad",
-                            # "threshold": 0.5,
-                            # "prefix_padding_ms": 300,
-                            # "silence_duration_ms": 200,
-                            # "create_response": True,
-                        },
-                    },
-                    "output": {
-                        "voice": "marin",
-                        "format": {
-                            "type": "audio/pcm",
-                            "rate": 24000,
-                        },
-                    },
-                },
-            }
-        )
-        # user_input = input("Enter a message: ")
-        user_input = "say the greeting message"
-        await connection.conversation.item.create(
-            item={
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": user_input}],
-            }
-        )
+    while True:
+        try:
+            # Read audio from microphone
+            input_audio = stream.read(BUFFER_SIZE, exception_on_overflow=False)
+            print(f"Read {len(input_audio)} bytes")
 
-        await connection.session.update(
-            session={
-                "type": "realtime",
-                "tools": [
-                    {
-                        "type": "function",
-                        "name": "get_knowledge",
-                        "description": "Get the knowledge from the uploaded files and instructions from the Vector Store Assistant.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "user query to retrieve the sematic information from the uploaded vector store assistant.",
-                                }
-                            },
-                            "required": ["query"],
-                        },
-                    }
-                ],
-                "tool_choice": "auto",
-            }
-        )
-        await connection.response.create()
-        # After the session is configured, data can be sent to the session.
-        while True:
-            input_audio = stream.read(BUFFER_SIZE)
-            print(input_audio)
             rms_value = calculate_rms(input_audio)
             print(f"{rms_value= }")
-            # Scenario 1: Silence detection after user speaks
+
+            # Detect speech
             if rms_value > THRESHOLD:
-                last_audio_time = time.time()  # Reset silence timer
+                last_audio_time = time.time()
+
+                # Barge-in: cancel AI if user starts speaking
                 if ai_speaking:
-                    # If AI is speaking, cancel AI response
-                    print("Barge-in detected, canceling AI response.")
-                    await connection.send({"type": "response.cancel"})
-            else:
-                # Check for 2 seconds of silence
-                if time.time() - last_audio_time > SILENCE_DURATION:
-                    print("Detected 2 seconds of silence, processing user input.")
-                    # Send audio to AI for processing
-                    await connection.input_audio_buffer.append(
-                        audio=base64.b64encode(cast(Any, input_audio)).decode("utf-8")
-                    )
-                    await connection.response.create()
+                    print("🎤 Barge-in detected, canceling AI response.")
+                    await connection.response.cancel()
+                    ai_speaking = False
 
-            async for event in connection:
-                print(f"\n\n{event= }\n\n")
-                if event.type == "response.output_text.delta":
-                    print(event.delta, flush=True, end="")
-                elif event.type == "session.created":
-                    print(f"Session ID: {event.session.id}")
-                elif event.type == "response.output_audio.delta":
-                    audio_data = base64.b64decode(event.delta)
-                    stream.write(audio_data)
-                    print(f"Received {len(audio_data)} bytes of audio data.")
-                elif event.type == "response.input_audio_transcript.delta":
-                    print(f"User text delta: {event.delta}")
-                elif event.type == "response.output_audio_transcript.delta":
-                    print(f"Received text delta: {event.delta}")
-                elif event.type == "response.function_call_arguments.delta":
-                    print("function call event ...")
-                    print(event)
-                elif event.type == "response.output_text.done":
-                    print()
-                elif event.type == "error":
-                    print("Received an error event.")
-                    print(f"Error code: {event.error.code}")
-                    print(f"Error Event ID: {event.error.event_id}")
-                    print(f"Error message: {event.error.message}")
-                elif event.type == "response.done":
-                    print("response.done event ...")
-                    print(event)
-                    break
+                # Send audio to buffer
+                base64_audio = base64.b64encode(input_audio).decode("utf-8")
 
-    print("Conversation ended.")
-    connection.close()
-    # Close the stream and terminate PyAudio
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+                await connection.input_audio_buffer.append(audio=base64_audio)
+                print("📤 Audio appended to buffer")
+
+            # Detect silence after speech
+            elif time.time() - last_audio_time > SILENCE_DURATION and not ai_speaking:
+                print("🔇 Silence detected, creating response...")
+                await connection.response.create()
+                last_audio_time = time.time()  # Reset to avoid repeat triggers
+
+            await asyncio.sleep(0.01)  # Small delay to prevent CPU spinning
+
+        except Exception as e:
+            print(f"❌ Error in audio capture: {e}")
+            await asyncio.sleep(0.1)
 
 
-asyncio.run(main())
+async def handle_ai_events(connection):
+    """Handle events from the AI"""
+    global ai_speaking
+
+    async for event in connection:
+        print(f"\n📨 Event: {event.type}\n")
+
+        if event.type == "response.output_text.delta":
+            print(event.delta, flush=True, end="")
+
+        # elif event.type == "session.created":
+        #     # print(f"✅ Session ID: {event.session.id}")
+
+        elif event.type == "response.output_audio.delta":
+            ai_speaking = True
+            audio_data = base64.b64decode(event.delta)
+            stream.write(audio_data)
+            print(f"🔊 Playing {len(audio_data)} bytes of audio")
+
+        elif event.type == "response.input_audio_transcript.delta":
+            print(f"👤 User said: {event.delta}")
+
+        elif event.type == "response.output_audio_transcript.delta":
+            print(f"🤖 AI said: {event.delta}")
+
+        elif event.type == "response.function_call_arguments.delta":
+            print("🔧 Function call event:")
+            print(event)
+
+        elif event.type == "response.output_text.done":
+            print()
+
+        elif event.type == "error":
+            print("❌ Error event:")
+            print(f"  Code: {event.error.code}")
+            print(f"  Message: {event.error.message}")
+
+        elif event.type == "response.done":
+            ai_speaking = False
+            print("✅ Response complete")
+
+
+async def main() -> None:
+    global ai_speaking, last_audio_time
+
+    try:
+        async with async_client.realtime.connect(
+            model="gpt-4o-realtime-preview",
+        ) as connection:
+            print("🔗 Connected to OpenAI Realtime API")
+
+            # Configure session
+            await connection.session.update(
+                session={
+                    "type": "realtime",
+                    "instructions": "You are a helpful assistant. You respond by voice and text. You have access to a knowledge assistant and can call it when you need information not in your knowledge. Alway answer in the English",
+                    "output_modalities": ["audio", "text"],
+                    "audio": {
+                        "input": {
+                            "transcription": {"model": "whisper-1"},
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                            "turn_detection": {"type": "server_vad"},
+                        },
+                        "output": {
+                            "voice": "alloy",
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                        },
+                    },
+                }
+            )
+
+            # Configure tools
+            await connection.session.update(
+                session={
+                    "type": "realtime",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "get_knowledge",
+                            "description": "Get knowledge from uploaded files and vector store",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": "string",
+                                        "description": "Query to retrieve semantic information",
+                                    }
+                                },
+                                "required": ["query"],
+                            },
+                        }
+                    ],
+                    "tool_choice": "auto",
+                }
+            )
+
+            # Send initial greeting
+            await connection.conversation.item.create(
+                item={
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Say a greeting message"}
+                    ],
+                }
+            )
+            await connection.response.create()
+
+            print("🎤 Starting audio capture and event handling...\n")
+
+            # Run both tasks concurrently - THIS IS THE KEY!
+            await asyncio.gather(
+                capture_and_send_audio(connection),
+                handle_ai_events(connection),
+            )
+
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down...")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
+    finally:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        print("🔌 Audio stream closed")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
