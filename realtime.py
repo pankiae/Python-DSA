@@ -1,19 +1,23 @@
 import asyncio
 import base64
+import time
 from typing import Any, cast
 
+import numpy as np
 import pyaudio
 from openai import AsyncOpenAI
 
 async_client = AsyncOpenAI(api_key="")
 
 # Audio properties
+SILENCE_DURATION = 2  # seconds of silence to wait before sending audio for processing
 RATE = 24000  # Sample rate (Hz)
 CHANNELS = 1  # Mono audio
 FORMAT = pyaudio.paInt16  # PCM format (16-bit)
 BUFFER_SIZE = 1024  # Number of frames per buffer
-THRESHOLD = 1000  # Threshold for audio volume detection (RMS value)
+THRESHOLD = 30  # Threshold for audio volume detection (RMS value)
 p = pyaudio.PyAudio()  # Open the audio stream
+
 stream = p.open(
     format=FORMAT,
     channels=CHANNELS,
@@ -23,11 +27,26 @@ stream = p.open(
     frames_per_buffer=BUFFER_SIZE,
 )
 
+ai_speaking = False
+last_audio_time = time.time()
+
+
+# Helper functions
+def calculate_rms(audio_data: bytes) -> float:
+    """Calculate RMS value from audio data."""
+    audio_np = np.frombuffer(audio_data, dtype=np.int16)
+    if audio_np.size == 0:
+        return float("nan")  # Handle empty buffers
+    rms = np.sqrt(np.mean(audio_np**2))
+    return rms
+
 
 async def main() -> None:
     """
     When prompted for user input, type a message and hit enter to send it to the model. Enter "q" to quit the conversation.
     """
+    global ai_speaking, last_audio_time
+
     async with async_client.realtime.connect(
         model="gpt-realtime",
     ) as connection:
@@ -73,45 +92,54 @@ async def main() -> None:
                 "content": [{"type": "input_text", "text": user_input}],
             }
         )
+
+        await connection.session.update(
+            session={
+                "type": "realtime",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_knowledge",
+                        "description": "Get the knowledge from the uploaded files and instructions from the Vector Store Assistant.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "user query to retrieve the sematic information from the uploaded vector store assistant.",
+                                }
+                            },
+                            "required": ["query"],
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+            }
+        )
+        await connection.response.create()
         # After the session is configured, data can be sent to the session.
         while True:
             input_audio = stream.read(BUFFER_SIZE)
-            await connection.conversation.item.create(
-                item={
-                    "type": "message",
-                    "role": "system",
-                    "content": [
-                        {"type": "input_text", "text": "say the greeting response."}
-                    ],
-                }
-            )
-            await connection.session.update(
-                session={
-                    "type": "realtime",
-                    "tools": [
-                        {
-                            "type": "function",
-                            "name": "get_knowledge",
-                            "description": "Get the knowledge from the uploaded files and instructions from the Vector Store Assistant.",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "query": {
-                                        "type": "string",
-                                        "description": "user query to retrieve the sematic information from the uploaded vector store assistant.",
-                                    }
-                                },
-                                "required": ["query"],
-                            },
-                        }
-                    ],
-                    "tool_choice": "auto",
-                }
-            )
-            await connection.input_audio_buffer.append(
-                audio=base64.b64encode(cast(Any, input_audio)).decode("utf-8")
-            )
-            await connection.response.create()
+            print(input_audio)
+            rms_value = calculate_rms(input_audio)
+            print(f"{rms_value= }")
+            # Scenario 1: Silence detection after user speaks
+            if rms_value > THRESHOLD:
+                last_audio_time = time.time()  # Reset silence timer
+                if ai_speaking:
+                    # If AI is speaking, cancel AI response
+                    print("Barge-in detected, canceling AI response.")
+                    await connection.send({"type": "response.cancel"})
+            else:
+                # Check for 2 seconds of silence
+                if time.time() - last_audio_time > SILENCE_DURATION:
+                    print("Detected 2 seconds of silence, processing user input.")
+                    # Send audio to AI for processing
+                    await connection.input_audio_buffer.append(
+                        audio=base64.b64encode(cast(Any, input_audio)).decode("utf-8")
+                    )
+                    await connection.response.create()
+
             async for event in connection:
                 print(f"\n\n{event= }\n\n")
                 if event.type == "response.output_text.delta":
@@ -140,9 +168,10 @@ async def main() -> None:
                     print("response.done event ...")
                     print(event)
                     break
-            print("Conversation ended.")
-            connection.close()
-            # Close the stream and terminate PyAudio
+
+    print("Conversation ended.")
+    connection.close()
+    # Close the stream and terminate PyAudio
     stream.stop_stream()
     stream.close()
     p.terminate()
