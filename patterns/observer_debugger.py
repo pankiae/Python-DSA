@@ -23,7 +23,7 @@ def debug_runtime(func):
 
         func_name = frame.f_code.co_name
         args = frame.f_locals
-        indent = "│   " * state.depth
+        indent = "│   " * (state.depth - 1)
 
         if event == "call":
             node = {"name": func_name, "start": time.time(), "children": [], "vars": {}}
