@@ -1,8 +1,12 @@
 import functools
 import inspect
+import os
 import sys
 import threading
 import time
+
+DEBUGGER_PATH = os.path.dirname(__file__)
+print(f"{DEBUGGER_PATH= }")
 
 
 def debug_runtime(func):
@@ -25,6 +29,10 @@ def debug_runtime(func):
         args = frame.f_locals
         indent = "│   " * (state.depth - 1)
 
+        filename = frame.f_code.co_filename
+        if not filename.startswith(DEBUGGER_PATH):
+            return tracer
+
         if event == "call":
             node = {"name": func_name, "start": time.time(), "children": [], "vars": {}}
             args_string = ", ".join([f"{k}={v}" for k, v in args.items()])
@@ -43,7 +51,7 @@ def debug_runtime(func):
             previous = state.locals_map.get(frame, {})
             for k, v in current.items():
                 if k not in previous:
-                    print(f"{indent}│   CREATE {k} = {v}")
+                    print(f"{indent}│   CREATE {k} ← {v}")
 
                 elif previous[k] != v:
                     print(f"{indent}│   UPDATE {k}: {previous[k]} → {v}")
