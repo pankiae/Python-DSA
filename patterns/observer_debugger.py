@@ -35,7 +35,8 @@ def debug_runtime(func):
 
         if event == "call":
             node = {"name": func_name, "start": time.time(), "children": [], "vars": {}}
-            args_string = ", ".join([f"{k}={v}" for k, v in args.items()])
+            arg_names = frame.f_code.co_varnames[: frame.f_code.co_argcount]
+            args_string = ", ".join(f"{name}={args.get(name)}" for name in arg_names)
             # print(f"{args_string= }")
             parent = state.node_stack[-1]
             parent["children"].append(node)
