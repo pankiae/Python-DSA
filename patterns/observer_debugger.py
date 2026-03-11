@@ -60,15 +60,18 @@ def debug_runtime(func):
 
         elif event == "line":
             current = frame.f_locals
-            previous = state.locals_map.get(frame, {})
+            previous = state.locals_map.get(id(frame), {})
+
             for k, v in current.items():
+                prev_v = previous.get(k, object())
+
                 if k not in previous:
                     print(f"{indent}│   CREATE {k} ← {v}")
 
-                elif previous[k] != v:
-                    print(f"{indent}│   UPDATE {k}: {previous[k]} → {v}")
+                elif id(prev_v) != id(v) or prev_v != v:
+                    print(f"{indent}│   UPDATE {k}: {prev_v} → {v}")
 
-            state.locals_map[frame] = current.copy()
+            state.locals_map[id(frame)] = current.copy()
 
         elif event == "return":
             state.depth -= 1
