@@ -21,6 +21,15 @@ def debug_runtime(func):
             state.tree = {"name": func.__name__, "children": []}
             state.node_stack = [state.tree]
 
+    def safe_repr(value):
+        try:
+            r = repr(value)
+            if len(r) > 80:
+                return r[:80] + "..."
+            return r
+        except:
+            return "<unrepr>"
+
     def tracer(frame, event, arg):
 
         init_state()
@@ -36,7 +45,9 @@ def debug_runtime(func):
         if event == "call":
             node = {"name": func_name, "start": time.time(), "children": [], "vars": {}}
             arg_names = frame.f_code.co_varnames[: frame.f_code.co_argcount]
-            args_string = ", ".join(f"{name}={args.get(name)}" for name in arg_names)
+            args_string = ", ".join(
+                f"{name}={safe_repr(args.get(name))}" for name in arg_names
+            )
             # print(f"{args_string= }")
             parent = state.node_stack[-1]
             parent["children"].append(node)
