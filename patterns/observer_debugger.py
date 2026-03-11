@@ -22,11 +22,13 @@ def debug_runtime(func):
         init_state()
 
         func_name = frame.f_code.co_name
+        args = frame.f_locals
         indent = "│   " * state.depth
 
         if event == "call":
             node = {"name": func_name, "start": time.time(), "children": [], "vars": {}}
-
+            args_string = ", ".join([f"{k}={v}" for k, v in args.items()])
+            # print(f"{args_string= }")
             parent = state.node_stack[-1]
             parent["children"].append(node)
 
@@ -34,12 +36,11 @@ def debug_runtime(func):
             state.locals_map[frame] = {}
             state.depth += 1
 
-            print(f"{indent}├── CALL {func_name}")
+            print(f"{indent}├── CALL {func_name}({args_string})")
 
         elif event == "line":
             current = frame.f_locals
             previous = state.locals_map.get(frame, {})
-
             for k, v in current.items():
                 if k not in previous:
                     print(f"{indent}│   CREATE {k} = {v}")
@@ -108,23 +109,22 @@ def print_tree(node, indent=0):
         print_tree(child, indent + 1)
 
 
-def helper(x):
-    temp = x + 5
-    return temp
+def helper(a, b=None):
+    total = a + (b or 0)
+    return total
 
 
-def compute(v):
-    a = v * 2
-    b = helper(a)
-    return b
+def compute(x, y=None):
+    value = helper(x, y)
+    return value
 
 
 @debug_runtime
-def main_api(x):
+def main_api(user_id, data=None):
 
-    result = compute(x)
+    result = compute(user_id, data)
 
-    final = result + 1
+    final = result * 2
     return final
 
 
