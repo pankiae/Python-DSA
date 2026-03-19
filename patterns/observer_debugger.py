@@ -4,9 +4,10 @@ import os
 import sys
 import threading
 import time
+import uuid
+from datetime import datetime
 
 DEBUGGER_PATH = os.path.dirname(__file__)
-print(f"{DEBUGGER_PATH= }")
 
 
 def debug_runtime(func):
@@ -16,10 +17,11 @@ def debug_runtime(func):
     def init_state():
         if not hasattr(state, "depth"):
             state.depth = 0
-            state.stack = []
             state.locals_map = {}
-            state.tree = {"name": func.__name__, "children": []}
-            state.node_stack = [state.tree]
+            state.logs = []
+            state.start_time = time.time()
+            state.status = "success"
+            state.process_id = f"req_{uuid.uuid4().hex[:8]}"
 
     def safe_repr(value):
         try:
@@ -30,33 +32,32 @@ def debug_runtime(func):
         except:
             return "<unrepr>"
 
+    def log(line):
+        state.logs.append(line)
+
     def tracer(frame, event, arg):
 
         init_state()
-
-        func_name = frame.f_code.co_name
-        args = frame.f_locals
-        indent = "│   " * (state.depth - 1)
 
         filename = frame.f_code.co_filename
         if not filename.startswith(DEBUGGER_PATH):
             return tracer
 
+        func_name = frame.f_code.co_name
+        indent = "│   " * (state.depth - 1)
+
         if event == "call":
-            node = {"name": func_name, "start": time.time(), "children": [], "vars": {}}
+            args = frame.f_locals
             arg_names = frame.f_code.co_varnames[: frame.f_code.co_argcount]
+
             args_string = ", ".join(
                 f"{name}={safe_repr(args.get(name))}" for name in arg_names
             )
-            # print(f"{args_string= }")
-            parent = state.node_stack[-1]
-            parent["children"].append(node)
 
-            state.node_stack.append(node)
-            state.locals_map[frame] = {}
             state.depth += 1
+            state.locals_map[id(frame)] = {}
 
-            print(f"{indent}├── CALL {func_name}({args_string})")
+            log(f"{indent}├── CALL {func_name}({args_string})")
 
         elif event == "line":
             current = frame.f_locals
@@ -66,10 +67,10 @@ def debug_runtime(func):
                 prev_v = previous.get(k, object())
 
                 if k not in previous:
-                    print(f"{indent}│   CREATE {k} ← {v}")
+                    log(f"{indent}│   CREATE {k} ← {safe_repr(v)}")
 
                 elif id(prev_v) != id(v) or prev_v != v:
-                    print(f"{indent}│   UPDATE {k}: {prev_v} → {v}")
+                    log(f"{indent}│   UPDATE {k}: {safe_repr(prev_v)} → {safe_repr(v)}")
 
             state.locals_map[id(frame)] = current.copy()
 
@@ -77,13 +78,31 @@ def debug_runtime(func):
             state.depth -= 1
             indent = "│   " * state.depth
 
-            node = state.node_stack.pop()
-            node["return"] = arg
-            node["duration"] = round(time.time() - node["start"], 6)
+            log(f"{indent}└── RETURN {func_name} → {safe_repr(arg)}")
 
-            print(f"{indent}└── RETURN {func_name} → {arg} ({node['duration']}s)")
+        elif event == "exception":
+            exc_type, exc_value, _ = arg
+
+            state.status = "error"
+
+            log(f"{indent}│   ERROR {exc_type.__name__}({safe_repr(exc_value)})")
 
         return tracer
+
+    def finalize_log(entry_name):
+
+        duration = round(time.time() - state.start_time, 6)
+
+        record = {
+            "process_id": state.process_id,
+            "timestamp": datetime.now().isoformat(),
+            "duration": duration,
+            "entry": entry_name,
+            "status": state.status,
+            "log": "\n".join(state.logs),
+        }
+
+        return record
 
     async def async_wrapper(*args, **kwargs):
 
@@ -91,25 +110,32 @@ def debug_runtime(func):
 
         try:
             result = await func(*args, **kwargs)
+        except Exception:
+            raise
         finally:
             sys.settrace(None)
 
-        print("\nExecution Tree:")
-        print_tree(state.tree)
+        record = finalize_log(func.__name__)
+        print(record)
 
         return result
 
     def sync_wrapper(*args, **kwargs):
 
         sys.settrace(tracer)
+        result = None
 
         try:
             result = func(*args, **kwargs)
+
+        except Exception as e:
+            state.status = "error"
+            raise
+
         finally:
             sys.settrace(None)
-
-        # print("\nExecution Tree:")
-        # print_tree(state.tree)
+            record = finalize_log(func.__name__)
+            print(record)
 
         return result
 
@@ -119,26 +145,17 @@ def debug_runtime(func):
     return functools.wraps(func)(sync_wrapper)
 
 
-def print_tree(node, indent=0):
-
-    space = "  " * indent
-
-    if "duration" in node:
-        print(f"{space}- {node['name']} (time={node['duration']}s)")
-    else:
-        print(f"{space}- {node['name']}")
-
-    for child in node.get("children", []):
-        print_tree(child, indent + 1)
-
-
 def helper(a, b=None):
     total = a + (b or 0)
+    total = total / 0
     return total
 
 
 def compute(x, y=None):
-    value = helper(x, y)
+    try:
+        value = helper(x, y)
+    except Exception as e:
+        pass
     return value
 
 
